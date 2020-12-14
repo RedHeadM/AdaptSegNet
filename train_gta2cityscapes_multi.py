@@ -22,11 +22,14 @@ from dataset.gta5_dataset import GTA5DataSet
 from dataset.gta5_dataset import GTA5DataSet
 from dataset.cityscapes_dataset import cityscapesDataSet
 from dataset.mulitview import MulitviewSegLoader
+from metrics import eval_metrics, AverageMeter
+
+from tqdm import tqdm
 
 IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
 
 MODEL = 'DeepLab'
-BATCH_SIZE = 1
+BATCH_SIZE = 2
 ITER_SIZE = 1
 NUM_WORKERS = 4
 DATA_DIRECTORY = '/media/markus/DATA/mutil_tex_3p/texture_multibot_push_left10050_bot/videos/val'
@@ -57,6 +60,115 @@ TARGET = 'cityscapes'
 SET = 'train'
 
 
+def data_loader_cycle(iterable):
+    '''
+    Using itertools.cycle has an important drawback, in that it does not shuffle the data after each iteration:
+        WARNING  itertools.cycle  does not shuffle the data after each iteratio
+        usage         data_iter = iter(cycle(self.data_loader))
+        '''
+    while True:
+        for x in iterable:
+            yield x
+
+class ValHelper():
+    def __init__(self,gpu,val_loader,model,loss,num_classes=NUM_CLASSES):
+
+        self.val_loader =val_loader
+        self.gpu=gpu
+        self.num_classes=num_classes
+        self._reset_metrics()
+        self.model=model
+        self.loss=loss
+
+    def _reset_metrics(self):
+        self.batch_time = AverageMeter()
+        self.data_time = AverageMeter()
+        self.total_loss = AverageMeter()
+        self.total_inter, self.total_union = 0, 0
+        self.total_correct, self.total_label = 0, 0
+
+    def _update_seg_metrics(self, correct, labeled, inter, union):
+        self.total_correct += correct
+        self.total_label += labeled
+        self.total_inter += inter
+        self.total_union += union
+
+
+    def _get_seg_metrics(self, no_bg = False):
+        pixAcc = 1.0 * self.total_correct / (np.spacing(1) + self.total_label)
+        IoU = 1.0 * self.total_inter / (np.spacing(1) + self.total_union)
+        mIoU = IoU.mean()
+        ret =  {
+            "Pixel_Accuracy": np.round(pixAcc, 3),
+            "Mean_IoU": np.round(mIoU, 3),
+            "Class_IoU": dict(zip(range(self.num_classes), np.round(IoU, 3)))
+        }
+
+        return ret
+
+    def valid_epoch(self, epoch):
+        print('\n###### EVALUATION ######')
+
+        self.wrt_mode = 'val'
+
+        self._reset_metrics()
+        tbar = tqdm(self.val_loader, ncols=130)
+        with torch.no_grad():
+            val_visual = []
+            for batch_idx, (data, target,*_) in enumerate(tbar):
+                data, target = data.to(self.gpu), target.to(self.gpu)
+                # LOSS
+                output = self.model(data.cuda(self.gpu))
+                loss = self.loss(output, target)
+                if isinstance(self.loss, torch.nn.DataParallel):
+                    loss = loss.mean()
+                self.total_loss.update(loss.item())
+
+                seg_metrics = eval_metrics(output, target, self.num_classes)
+                # rm backgroud form loss with lable zero
+                self._update_seg_metrics(*seg_metrics)
+
+                # LIST OF IMAGE TO VIZ (15 images)
+                if len(val_visual) < 15:
+                    target_np = target.data.cpu().numpy()
+                    output_np = output.data.max(1)[1].cpu().numpy()
+                    val_visual.append([data[0].data.cpu(), target_np[0], output_np[0]])
+
+                # PRINT INFO
+                pixAcc, mIoU, _ = self._get_seg_metrics().values()
+                tbar.set_description('EVAL ({}) | Loss: {:.3f}, PixelAcc: {:.2f}, Mean IoU: {:.2f} |'.format( epoch,
+                                                self.total_loss.average,
+                                                pixAcc, mIoU))
+
+            # WRTING & VISUALIZING THE MASKS
+#             val_img = []
+            # palette = self.train_loader.dataset.palette
+            # for d, t, o in val_visual:
+                # d = self.restore_transform(d)
+                # t, o = colorize_mask(t, palette), colorize_mask(o, palette)
+                # d, t, o = d.convert('RGB'), t.convert('RGB'), o.convert('RGB')
+                # [d, t, o] = [self.viz_transform(x) for x in [d, t, o]]
+                # val_img.extend([d, t, o])
+            # val_img = torch.stack(val_img, 0)
+            # val_img = make_grid(val_img.cpu(), nrow=3, padding=5)
+            # self.writer.add_image(f'{self.wrt_mode}/inputs_targets_predictions', val_img, self.wrt_step)
+
+            # # METRICS TO TENSORBOARD
+            # self.wrt_step = (epoch) * len(self.val_loader)
+            # self.writer.add_scalar(f'{self.wrt_mode}/loss', self.total_loss.average, self.wrt_step)
+            # seg_metrics = self._get_seg_metrics(no_bg=True)
+            # for k, v in list(seg_metrics.items())[:-1]:
+                # if not isinstance(v,dict ):
+                    # self.writer.add_scalar(f'{self.wrt_mode}/{k}', v, self.wrt_step)
+
+            log = {
+                'val_loss': self.total_loss.average,
+                **seg_metrics
+            }
+
+        return log
+
+
 def get_arguments():
     """Parse all the arguments provided from the CLI.
 
@@ -72,6 +184,8 @@ def get_arguments():
                         help="Number of images sent to the network in one step.")
     parser.add_argument("--iter-size", type=int, default=ITER_SIZE,
                         help="Accumulate gradients for ITER_SIZE iterations.")
+    parser.add_argument("--val-steps", type=int, default=5000,
+                        help="val iter")
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS,
                         help="number of workers for multithread dataloading.")
     parser.add_argument("--data-dir", type=str, default=DATA_DIRECTORY,
@@ -134,17 +248,24 @@ def get_arguments():
 args = get_arguments()
 
 
-def loss_calc(pred, label, gpu):
+
+class CrossEntropyLoss2d(nn.Module):
+    def __init__(self, weight=None, ignore_index=255, reduction='mean'):
+        super(CrossEntropyLoss2d, self).__init__()
+        self.CE =  nn.CrossEntropyLoss(weight=weight, ignore_index=ignore_index, reduction=reduction)
+
+    def forward(self, output, target):
+        loss = self.CE(output, target)
+        return loss
+
+
+def loss_calc(pred, label, gpu,criterion):
     """
     This function returns cross entropy loss for semantic segmentation
     """
     # out shape batch_size x channels x h x w -> batch_size x channels x h x w
     # label shape h x w x 1 x batch_size  -> batch_size x 1 x h x w
     label = Variable(label.long()).cuda(gpu)
-    print('pred: {}'.format(pred.shape))
-    print('loss label: {}'.format(label.shape))
-    criterion = CrossEntropy2d().cuda(gpu)
-    print('criterion: {}'.format(criterion))
 
     return criterion(pred, label)
 
@@ -193,7 +314,7 @@ def main():
             # Scale.layer5.conv2d_list.3.weight
             i_parts = i.split('.')
             # print i_parts
-            if not args.num_classes == 19 and not i_parts[1] == 'layer5':
+            if  args.num_classes != 19 and i_parts[1] != 'layer5':
                 new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
         # if args.num_classes !=19:
                 # print i_parts
@@ -220,7 +341,7 @@ def main():
     trainloader = data.DataLoader(
         MulitviewSegLoader(
                                     root=args.data_dir,
-                                    number_views=2,
+                                    number_views=1,
                                     view_idx=0,
             # max_iters=args.num_steps * args.iter_size * args.batch_size,
                     # crop_size=input_size,
@@ -228,25 +349,46 @@ def main():
                     img_mean=IMG_MEAN),
         batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
 
-    trainloader_iter = iter(trainloader)
+    trainloader_iter = iter(data_loader_cycle(trainloader))
 
     targetloader = data.DataLoader(MulitviewSegLoader(
                                     root=args.data_dir_target,
-                                    number_views=2,
+                                    number_views=1,
                                     view_idx=0,
-                                                     # max_iters=args.num_steps * args.iter_size * args.batch_size,
-                                                     # crop_size=input_size_target,
-                                                     # scale=False,
-                                                     # mirror=args.random_mirror,
-                                                     img_mean=IMG_MEAN,
-                                                     # set=args.set
-                                                     ),
+                                     # max_iters=args.num_steps * args.iter_size * args.batch_size,
+                                     # crop_size=input_size_target,
+                                     # scale=False,
+                                     # mirror=args.random_mirror,
+                                     img_mean=IMG_MEAN,
+                                     # set=args.set
+                                     ),
                                    batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                    pin_memory=True)
 
 
-    targetloader_iter = iter(targetloader)
+    interp = nn.Upsample(size=(input_size[1], input_size[0]), mode='bilinear')
+    interp_target = nn.Upsample(size=(input_size_target[1], input_size_target[0]), mode='bilinear')
+    def mdl_val_func(x):
+        return interp_target(model(x)[1])
 
+    targetloader_iter = iter(data_loader_cycle(targetloader))
+    val_loader = data.DataLoader(MulitviewSegLoader(
+                                    root=args.data_dir_target,
+                                    number_views=1,
+                                    view_idx=0,
+                                     # max_iters=args.num_steps * args.iter_size * args.batch_size,
+                                     # crop_size=input_size_target,
+                                     # scale=False,
+                                     # mirror=args.random_mirror,
+                                     img_mean=IMG_MEAN,
+                                     # set=args.set
+                                     ),
+                                   batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                   pin_memory=True)
+
+
+    criterion = CrossEntropyLoss2d().cuda(args.gpu)
+    valhelper= ValHelper(gpu=args.gpu,model=mdl_val_func,val_loader=val_loader,loss=criterion)
     # implement model.optim_parameters(args) to handle different models' lr setting
 
     optimizer = optim.SGD(model.optim_parameters(args),
@@ -264,8 +406,6 @@ def main():
     elif args.gan == 'LS':
         bce_loss = torch.nn.MSELoss()
 
-    interp = nn.Upsample(size=(input_size[1], input_size[0]), mode='bilinear')
-    interp_target = nn.Upsample(size=(input_size_target[1], input_size_target[0]), mode='bilinear')
 
     # labels for adversarial training
     source_label = 0
@@ -289,6 +429,7 @@ def main():
         adjust_learning_rate_D(optimizer_D1, i_iter)
         adjust_learning_rate_D(optimizer_D2, i_iter)
 
+
         for sub_i in range(args.iter_size):
 
             # train G
@@ -302,30 +443,27 @@ def main():
 
             # train with source
 
-            batch = trainloader_iter.next()
+            batch = next(trainloader_iter)
             images, labels, *_ = batch
-            print('images: {}'.format(images.shape))
-            print('labels: {}'.format(labels.shape))
             images = Variable(images).cuda(args.gpu)
 
             pred1, pred2 = model(images)
             pred1 = interp(pred1)
             pred2 = interp(pred2)
 
-            loss_seg1 = loss_calc(pred1, labels, args.gpu)
-            loss_seg2 = loss_calc(pred2, labels, args.gpu)
+            loss_seg1 = loss_calc(pred1, labels, args.gpu,criterion)
+            loss_seg2 = loss_calc(pred2, labels, args.gpu,criterion)
             loss = loss_seg2 + args.lambda_seg * loss_seg1
 
             # proper normalization
             loss = loss / args.iter_size
             loss.backward()
-            print('loss_seg1: {}'.format(loss_seg1.shape))
-            loss_seg_value1 += loss_seg1.data.cpu().numpy()[0] / args.iter_size
-            loss_seg_value2 += loss_seg2.data.cpu().numpy()[0] / args.iter_size
+            loss_seg_value1 += loss_seg1.data.cpu().numpy() / args.iter_size
+            loss_seg_value2 += loss_seg2.data.cpu().numpy() / args.iter_size
 
             # train with target
 
-            batch = targetloader_iter.next()
+            batch = next(targetloader_iter)
             images,* _  = batch
             images = Variable(images).cuda(args.gpu)
 
@@ -347,8 +485,8 @@ def main():
             loss = args.lambda_adv_target1 * loss_adv_target1 + args.lambda_adv_target2 * loss_adv_target2
             loss = loss / args.iter_size
             loss.backward()
-            loss_adv_target_value1 += loss_adv_target1.data.cpu().numpy()[0] / args.iter_size
-            loss_adv_target_value2 += loss_adv_target2.data.cpu().numpy()[0] / args.iter_size
+            loss_adv_target_value1 += loss_adv_target1.data.cpu().numpy() / args.iter_size
+            loss_adv_target_value2 += loss_adv_target2.data.cpu().numpy() / args.iter_size
 
             # train D
 
@@ -378,8 +516,8 @@ def main():
             loss_D1.backward()
             loss_D2.backward()
 
-            loss_D_value1 += loss_D1.data.cpu().numpy()[0]
-            loss_D_value2 += loss_D2.data.cpu().numpy()[0]
+            loss_D_value1 += loss_D1.data.cpu().numpy()
+            loss_D_value2 += loss_D2.data.cpu().numpy()
 
             # train with target
             pred_target1 = pred_target1.detach()
@@ -400,13 +538,18 @@ def main():
             loss_D1.backward()
             loss_D2.backward()
 
-            loss_D_value1 += loss_D1.data.cpu().numpy()[0]
-            loss_D_value2 += loss_D2.data.cpu().numpy()[0]
+            loss_D_value1 += loss_D1.data.cpu().numpy()
+            loss_D_value2 += loss_D2.data.cpu().numpy()
 
         optimizer.step()
         optimizer_D1.step()
         optimizer_D2.step()
+        if i_iter in range(args.val_steps):
+            model.eval()
+            log=valhelper.valid_epoch(i_iter)
+            model.train()
 
+        print('log: {}'.format(log))
         print('exp = {}'.format(args.snapshot_dir))
         print(
         'iter = {0:8d}/{1:8d}, loss_seg1 = {2:.3f} loss_seg2 = {3:.3f} loss_adv1 = {4:.3f}, loss_adv2 = {5:.3f} loss_D1 = {6:.3f} loss_D2 = {7:.3f}'.format(
