@@ -1,4 +1,5 @@
-import argparseimport torch
+import argparse
+import torch
 import torch.nn as nn
 import datetime
 from torch.utils import data, model_zoo
@@ -562,11 +563,11 @@ def main():
         optimizer.step()
         optimizer_D1.step()
         optimizer_D2.step()
-        # if i_iter%args.val_steps==0 and i_iter:
-        model.eval()
-        log=valhelper.valid_epoch(i_iter)
-        print('log: {}'.format(log))
-        model.train()
+        if i_iter%args.val_steps==0 and i_iter:
+            model.eval()
+            log=valhelper.valid_epoch(i_iter)
+            print('log: {}'.format(log))
+            model.train()
 
         if i_iter%10==0 and i_iter:
             print('exp = {}'.format(args.snapshot_dir))
