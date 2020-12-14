@@ -143,8 +143,8 @@ class ValHelper():
                     target_np = target.data.cpu().numpy()
                     output_np = output.data.max(1)[1].cpu().numpy()
                     val_visual.append([data[0].data.cpu(), target_np[0], output_np[0]])
-                else:
-                    break# debug
+                # else:
+                    # break# debug
                 # PRINT INFO
                 pixAcc, mIoU, _ = self._get_seg_metrics().values()
                 tbar.set_description('EVAL ({}) | Loss: {:.3f}, PixelAcc: {:.2f}, Mean IoU: {:.2f} |'.format( epoch,
