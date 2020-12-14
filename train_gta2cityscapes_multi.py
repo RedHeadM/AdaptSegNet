@@ -202,6 +202,8 @@ def get_arguments():
                         help="number of workers for multithread dataloading.")
     parser.add_argument("--data-dir", type=str, default=DATA_DIRECTORY,
                         help="Path to the directory containing the source dataset.")
+    parser.add_argument("--data-dir-val", type=str, default=DATA_DIRECTORY,
+                        help="Path to the directory containing the source dataset.")
     parser.add_argument("--input-size", type=str, default=INPUT_SIZE,
                         help="Comma-separated string with height and width of source images.")
     parser.add_argument("--data-dir-target", type=str, default=DATA_DIRECTORY_TARGET,
@@ -391,7 +393,7 @@ def main():
 
     targetloader_iter = iter(data_loader_cycle(targetloader))
     val_loader = data.DataLoader(MulitviewSegLoader(
-                                    root=args.data_dir_target,
+                                    root=args.data_dir_val,
                                     number_views=1,
                                     view_idx=0,
                                     num_classes=args.num_classes,
