@@ -19,7 +19,9 @@ from model.deeplab_multi import DeeplabMulti
 from model.discriminator import FCDiscriminator
 from utils.loss import CrossEntropy2d
 from dataset.gta5_dataset import GTA5DataSet
+from dataset.gta5_dataset import GTA5DataSet
 from dataset.cityscapes_dataset import cityscapesDataSet
+from dataset.mulitview import MulitviewSegLoader
 
 IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
 
@@ -27,16 +29,14 @@ MODEL = 'DeepLab'
 BATCH_SIZE = 1
 ITER_SIZE = 1
 NUM_WORKERS = 4
-DATA_DIRECTORY = './data/GTA5'
-DATA_LIST_PATH = './dataset/gta5_list/train.txt'
+DATA_DIRECTORY = '/media/markus/DATA/mutil_tex_3p/texture_multibot_push_left10050_bot/videos/val'
 IGNORE_LABEL = 255
-INPUT_SIZE = '1280,720'
-DATA_DIRECTORY_TARGET = './data/Cityscapes/data'
-DATA_LIST_PATH_TARGET = './dataset/cityscapes_list/train.txt'
-INPUT_SIZE_TARGET = '1024,512'
+INPUT_SIZE = '300,300'
+DATA_DIRECTORY_TARGET = '/media/markus/DATA/mutil_tex_3p/texture_multibot_push_left10050_bot/videos/val'
+INPUT_SIZE_TARGET = '300,300'
 LEARNING_RATE = 2.5e-4
 MOMENTUM = 0.9
-NUM_CLASSES = 19
+NUM_CLASSES = 10
 NUM_STEPS = 250000
 NUM_STEPS_STOP = 150000  # early stopping
 POWER = 0.9
@@ -76,16 +76,10 @@ def get_arguments():
                         help="number of workers for multithread dataloading.")
     parser.add_argument("--data-dir", type=str, default=DATA_DIRECTORY,
                         help="Path to the directory containing the source dataset.")
-    parser.add_argument("--data-list", type=str, default=DATA_LIST_PATH,
-                        help="Path to the file listing the images in the source dataset.")
-    parser.add_argument("--ignore-label", type=int, default=IGNORE_LABEL,
-                        help="The index of the label to ignore during the training.")
     parser.add_argument("--input-size", type=str, default=INPUT_SIZE,
                         help="Comma-separated string with height and width of source images.")
     parser.add_argument("--data-dir-target", type=str, default=DATA_DIRECTORY_TARGET,
                         help="Path to the directory containing the target dataset.")
-    parser.add_argument("--data-list-target", type=str, default=DATA_LIST_PATH_TARGET,
-                        help="Path to the file listing the images in the target dataset.")
     parser.add_argument("--input-size-target", type=str, default=INPUT_SIZE_TARGET,
                         help="Comma-separated string with height and width of target images.")
     parser.add_argument("--is-training", action="store_true",
@@ -147,7 +141,10 @@ def loss_calc(pred, label, gpu):
     # out shape batch_size x channels x h x w -> batch_size x channels x h x w
     # label shape h x w x 1 x batch_size  -> batch_size x 1 x h x w
     label = Variable(label.long()).cuda(gpu)
+    print('pred: {}'.format(pred.shape))
+    print('loss label: {}'.format(label.shape))
     criterion = CrossEntropy2d().cuda(gpu)
+    print('criterion: {}'.format(criterion))
 
     return criterion(pred, label)
 
@@ -191,12 +188,15 @@ def main():
             saved_state_dict = torch.load(args.restore_from)
 
         new_params = model.state_dict().copy()
+
         for i in saved_state_dict:
             # Scale.layer5.conv2d_list.3.weight
             i_parts = i.split('.')
+            print('i_parts: {}'.format(i_parts))
             # print i_parts
-            if not args.num_classes == 19 or not i_parts[1] == 'layer5':
+            if not args.num_classes == 19 and not i_parts[1] == 'layer5':
                 new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
+        # if args.num_classes !=19:
                 # print i_parts
         model.load_state_dict(new_params)
 
@@ -219,23 +219,34 @@ def main():
         os.makedirs(args.snapshot_dir)
 
     trainloader = data.DataLoader(
-        GTA5DataSet(args.data_dir, args.data_list, max_iters=args.num_steps * args.iter_size * args.batch_size,
-                    crop_size=input_size,
-                    scale=args.random_scale, mirror=args.random_mirror, mean=IMG_MEAN),
+        MulitviewSegLoader(
+                                    root=args.data_dir,
+                                    number_views=2,
+                                    view_idx=0,
+            # max_iters=args.num_steps * args.iter_size * args.batch_size,
+                    # crop_size=input_size,
+                    # scale=args.random_scale, mirror=args.random_mirror,
+                    img_mean=IMG_MEAN),
         batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
 
-    trainloader_iter = enumerate(trainloader)
+    trainloader_iter = iter(trainloader)
 
-    targetloader = data.DataLoader(cityscapesDataSet(args.data_dir_target, args.data_list_target,
-                                                     max_iters=args.num_steps * args.iter_size * args.batch_size,
-                                                     crop_size=input_size_target,
-                                                     scale=False, mirror=args.random_mirror, mean=IMG_MEAN,
-                                                     set=args.set),
+    targetloader = data.DataLoader(MulitviewSegLoader(
+                                    root=args.data_dir_target,
+                                    number_views=2,
+                                    view_idx=0,
+                                                     # max_iters=args.num_steps * args.iter_size * args.batch_size,
+                                                     # crop_size=input_size_target,
+                                                     # scale=False,
+                                                     # mirror=args.random_mirror,
+                                                     img_mean=IMG_MEAN,
+                                                     # set=args.set
+                                                     ),
                                    batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                    pin_memory=True)
 
 
-    targetloader_iter = enumerate(targetloader)
+    targetloader_iter = iter(targetloader)
 
     # implement model.optim_parameters(args) to handle different models' lr setting
 
@@ -292,8 +303,10 @@ def main():
 
             # train with source
 
-            _, batch = trainloader_iter.next()
-            images, labels, _, _ = batch
+            batch = trainloader_iter.next()
+            images, labels, *_ = batch
+            print('images: {}'.format(images.shape))
+            print('labels: {}'.format(labels.shape))
             images = Variable(images).cuda(args.gpu)
 
             pred1, pred2 = model(images)
@@ -307,13 +320,14 @@ def main():
             # proper normalization
             loss = loss / args.iter_size
             loss.backward()
+            print('loss_seg1: {}'.format(loss_seg1.shape))
             loss_seg_value1 += loss_seg1.data.cpu().numpy()[0] / args.iter_size
             loss_seg_value2 += loss_seg2.data.cpu().numpy()[0] / args.iter_size
 
             # train with target
 
-            _, batch = targetloader_iter.next()
-            images, _, _ = batch
+            batch = targetloader_iter.next()
+            images,* _  = batch
             images = Variable(images).cuda(args.gpu)
 
             pred_target1, pred_target2 = model(images)
@@ -400,14 +414,14 @@ def main():
             i_iter, args.num_steps, loss_seg_value1, loss_seg_value2, loss_adv_target_value1, loss_adv_target_value2, loss_D_value1, loss_D_value2))
 
         if i_iter >= args.num_steps_stop - 1:
-            print 'save model ...'
+            print ('save model ...')
             torch.save(model.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(args.num_steps_stop) + '.pth'))
             torch.save(model_D1.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(args.num_steps_stop) + '_D1.pth'))
             torch.save(model_D2.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(args.num_steps_stop) + '_D2.pth'))
             break
 
         if i_iter % args.save_pred_every == 0 and i_iter != 0:
-            print 'taking snapshot ...'
+            print ('taking snapshot ...')
             torch.save(model.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '.pth'))
             torch.save(model_D1.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '_D1.pth'))
             torch.save(model_D2.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '_D2.pth'))
