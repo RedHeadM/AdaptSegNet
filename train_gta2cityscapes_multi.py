@@ -544,16 +544,17 @@ def main():
         optimizer.step()
         optimizer_D1.step()
         optimizer_D2.step()
-        if i_iter in range(args.val_steps):
+        if i_iter%args.val_steps==0 and i_iter:
             model.eval()
             log=valhelper.valid_epoch(i_iter)
+            print('log: {}'.format(log))
             model.train()
 
-        print('log: {}'.format(log))
-        print('exp = {}'.format(args.snapshot_dir))
-        print(
-        'iter = {0:8d}/{1:8d}, loss_seg1 = {2:.3f} loss_seg2 = {3:.3f} loss_adv1 = {4:.3f}, loss_adv2 = {5:.3f} loss_D1 = {6:.3f} loss_D2 = {7:.3f}'.format(
-            i_iter, args.num_steps, loss_seg_value1, loss_seg_value2, loss_adv_target_value1, loss_adv_target_value2, loss_D_value1, loss_D_value2))
+        if i_iter%100==0 and i_iter:
+            print('exp = {}'.format(args.snapshot_dir))
+            print(
+            'iter = {0:8d}/{1:8d}, loss_seg1 = {2:.3f} loss_seg2 = {3:.3f} loss_adv1 = {4:.3f}, loss_adv2 = {5:.3f} loss_D1 = {6:.3f} loss_D2 = {7:.3f}'.format(
+                i_iter, args.num_steps, loss_seg_value1, loss_seg_value2, loss_adv_target_value1, loss_adv_target_value2, loss_D_value1, loss_D_value2))
 
         if i_iter >= args.num_steps_stop - 1:
             print ('save model ...')
