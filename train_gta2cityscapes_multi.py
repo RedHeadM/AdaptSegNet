@@ -36,7 +36,7 @@ DATA_DIRECTORY_TARGET = '/media/markus/DATA/mutil_tex_3p/texture_multibot_push_l
 INPUT_SIZE_TARGET = '300,300'
 LEARNING_RATE = 2.5e-4
 MOMENTUM = 0.9
-NUM_CLASSES = 10
+NUM_CLASSES = 12
 NUM_STEPS = 250000
 NUM_STEPS_STOP = 150000  # early stopping
 POWER = 0.9
@@ -192,7 +192,6 @@ def main():
         for i in saved_state_dict:
             # Scale.layer5.conv2d_list.3.weight
             i_parts = i.split('.')
-            print('i_parts: {}'.format(i_parts))
             # print i_parts
             if not args.num_classes == 19 and not i_parts[1] == 'layer5':
                 new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
