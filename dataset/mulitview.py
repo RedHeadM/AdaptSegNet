@@ -4,6 +4,22 @@ import scipy.misc as m
 from torch.utils import data
 from multiview.video.datasets import ViewPairDataset
 
+def get_voc_palette(num_classes):
+    n = num_classes
+    palette = [0]*(n*3)
+    for j in range(0,n):
+            lab = j
+            palette[j*3+0] = 0
+            palette[j*3+1] = 0
+            palette[j*3+2] = 0
+            i = 0
+            while (lab > 0):
+                    palette[j*3+0] |= (((lab >> 0) & 1) << (7-i))
+                    palette[j*3+1] |= (((lab >> 1) & 1) << (7-i))
+                    palette[j*3+2] |= (((lab >> 2) & 1) << (7-i))
+                    i = i + 1
+                    lab >>= 3
+    return palette
 
 class MulitviewSegLoader(data.Dataset):
 
@@ -39,6 +55,7 @@ class MulitviewSegLoader(data.Dataset):
         root,
         number_views,
         view_idx,
+        num_classes,
         load_seg_mask = True,
         is_transform=True,
         img_size=(300, 300),
@@ -56,6 +73,7 @@ class MulitviewSegLoader(data.Dataset):
         :param img_size:
         :param augmentations
         """
+        self.palette = get_voc_palette(num_classes)
         self.root = root
         self.is_transform = is_transform
         self.view_idx = view_idx

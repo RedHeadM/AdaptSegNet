@@ -1,6 +1,6 @@
-import argparse
-import torch
+import argparseimport torch
 import torch.nn as nn
+import datetime
 from torch.utils import data, model_zoo
 import numpy as np
 import pickle
@@ -19,13 +19,13 @@ from model.deeplab_multi import DeeplabMulti
 from model.discriminator import FCDiscriminator
 from utils.loss import CrossEntropy2d
 from dataset.gta5_dataset import GTA5DataSet
-from dataset.gta5_dataset import GTA5DataSet
 from dataset.cityscapes_dataset import cityscapesDataSet
 from dataset.mulitview import MulitviewSegLoader
-from metrics import eval_metrics, AverageMeter
-
+from metrics import eval_metrics, AverageMeter,colorize_mask
+from torch.utils import tensorboard
+from torchvision import transforms
 from tqdm import tqdm
-
+from torchvision.utils import make_grid
 IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
 
 MODEL = 'DeepLab'
@@ -71,14 +71,24 @@ def data_loader_cycle(iterable):
             yield x
 
 class ValHelper():
-    def __init__(self,gpu,val_loader,model,loss,num_classes=NUM_CLASSES):
+    def __init__(self,gpu,val_loader,model,loss,num_classes=NUM_CLASSES,writer=None):
 
         self.val_loader =val_loader
         self.gpu=gpu
         self.num_classes=num_classes
         self._reset_metrics()
+        self.wrt_step =0
         self.model=model
         self.loss=loss
+        self.writer=writer
+        # TRANSORMS FOR VISUALIZATION
+        self.restore_transform = transforms.Compose([
+            # local_transforms.DeNormalize(self.train_loader.MEAN, self.train_loader.STD),
+            transforms.ToPILImage()])
+
+        self.viz_transform = transforms.Compose([
+            transforms.Resize((300, 300)),
+            transforms.ToTensor()])
 
     def _reset_metrics(self):
         self.batch_time = AverageMeter()
@@ -133,7 +143,8 @@ class ValHelper():
                     target_np = target.data.cpu().numpy()
                     output_np = output.data.max(1)[1].cpu().numpy()
                     val_visual.append([data[0].data.cpu(), target_np[0], output_np[0]])
-
+                else:
+                    break# debug
                 # PRINT INFO
                 pixAcc, mIoU, _ = self._get_seg_metrics().values()
                 tbar.set_description('EVAL ({}) | Loss: {:.3f}, PixelAcc: {:.2f}, Mean IoU: {:.2f} |'.format( epoch,
@@ -141,25 +152,25 @@ class ValHelper():
                                                 pixAcc, mIoU))
 
             # WRTING & VISUALIZING THE MASKS
-#             val_img = []
-            # palette = self.train_loader.dataset.palette
-            # for d, t, o in val_visual:
-                # d = self.restore_transform(d)
-                # t, o = colorize_mask(t, palette), colorize_mask(o, palette)
-                # d, t, o = d.convert('RGB'), t.convert('RGB'), o.convert('RGB')
-                # [d, t, o] = [self.viz_transform(x) for x in [d, t, o]]
-                # val_img.extend([d, t, o])
-            # val_img = torch.stack(val_img, 0)
-            # val_img = make_grid(val_img.cpu(), nrow=3, padding=5)
-            # self.writer.add_image(f'{self.wrt_mode}/inputs_targets_predictions', val_img, self.wrt_step)
+            val_img = []
+            palette = self.val_loader.dataset.palette
+            for d, t, o in val_visual:
+                d = self.restore_transform(d)
+                t, o = colorize_mask(t, palette), colorize_mask(o, palette)
+                d, t, o = d.convert('RGB'), t.convert('RGB'), o.convert('RGB')
+                [d, t, o] = [self.viz_transform(x) for x in [d, t, o]]
+                val_img.extend([d, t, o])
+            val_img = torch.stack(val_img, 0)
+            val_img = make_grid(val_img.cpu(), nrow=3, padding=5)
+            self.writer.add_image(f'{self.wrt_mode}/inputs_targets_predictions', val_img, self.wrt_step)
 
-            # # METRICS TO TENSORBOARD
-            # self.wrt_step = (epoch) * len(self.val_loader)
-            # self.writer.add_scalar(f'{self.wrt_mode}/loss', self.total_loss.average, self.wrt_step)
-            # seg_metrics = self._get_seg_metrics(no_bg=True)
-            # for k, v in list(seg_metrics.items())[:-1]:
-                # if not isinstance(v,dict ):
-                    # self.writer.add_scalar(f'{self.wrt_mode}/{k}', v, self.wrt_step)
+            # METRICS TO TENSORBOARD
+            self.wrt_step = (epoch) * len(self.val_loader)
+            self.writer.add_scalar(f'{self.wrt_mode}/loss', self.total_loss.average, self.wrt_step)
+            seg_metrics = self._get_seg_metrics(no_bg=True)
+            for k, v in list(seg_metrics.items())[:-1]:
+                if not isinstance(v,dict ):
+                    self.writer.add_scalar(f'{self.wrt_mode}/{k}', v, self.wrt_step)
 
             log = {
                 'val_loss': self.total_loss.average,
@@ -242,6 +253,8 @@ def get_arguments():
                         help="choose adaptation set.")
     parser.add_argument("--gan", type=str, default=GAN,
                         help="choose the GAN objective.")
+    parser.add_argument("-n","--name", type=str, default="name",
+                        help="name ")
     return parser.parse_args()
 
 
@@ -319,6 +332,9 @@ def main():
         # if args.num_classes !=19:
                 # print i_parts
         model.load_state_dict(new_params)
+    start_time = datetime.datetime.now().strftime('%m-%d_%H-%M')
+    writer_dir = os.path.join("./logs/", args.name, start_time)
+    writer = tensorboard.SummaryWriter(writer_dir)
 
     model.train()
     model.cuda(args.gpu)
@@ -339,10 +355,10 @@ def main():
         os.makedirs(args.snapshot_dir)
 
     trainloader = data.DataLoader(
-        MulitviewSegLoader(
+        MulitviewSegLoader(num_classes=args.num_classes,
                                     root=args.data_dir,
-                                    number_views=1,
-                                    view_idx=0,
+                                    number_views=2,
+                                    view_idx=1,
             # max_iters=args.num_steps * args.iter_size * args.batch_size,
                     # crop_size=input_size,
                     # scale=args.random_scale, mirror=args.random_mirror,
@@ -353,6 +369,7 @@ def main():
 
     targetloader = data.DataLoader(MulitviewSegLoader(
                                     root=args.data_dir_target,
+                                    num_classes=args.num_classes,
                                     number_views=1,
                                     view_idx=0,
                                      # max_iters=args.num_steps * args.iter_size * args.batch_size,
@@ -376,6 +393,7 @@ def main():
                                     root=args.data_dir_target,
                                     number_views=1,
                                     view_idx=0,
+                                    num_classes=args.num_classes,
                                      # max_iters=args.num_steps * args.iter_size * args.batch_size,
                                      # crop_size=input_size_target,
                                      # scale=False,
@@ -383,12 +401,12 @@ def main():
                                      img_mean=IMG_MEAN,
                                      # set=args.set
                                      ),
-                                   batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                                    pin_memory=True)
 
 
     criterion = CrossEntropyLoss2d().cuda(args.gpu)
-    valhelper= ValHelper(gpu=args.gpu,model=mdl_val_func,val_loader=val_loader,loss=criterion)
+    valhelper= ValHelper(gpu=args.gpu,model=mdl_val_func,val_loader=val_loader,loss=criterion,writer=writer)
     # implement model.optim_parameters(args) to handle different models' lr setting
 
     optimizer = optim.SGD(model.optim_parameters(args),
@@ -544,13 +562,13 @@ def main():
         optimizer.step()
         optimizer_D1.step()
         optimizer_D2.step()
-        if i_iter%args.val_steps==0 and i_iter:
-            model.eval()
-            log=valhelper.valid_epoch(i_iter)
-            print('log: {}'.format(log))
-            model.train()
+        # if i_iter%args.val_steps==0 and i_iter:
+        model.eval()
+        log=valhelper.valid_epoch(i_iter)
+        print('log: {}'.format(log))
+        model.train()
 
-        if i_iter%100==0 and i_iter:
+        if i_iter%10==0 and i_iter:
             print('exp = {}'.format(args.snapshot_dir))
             print(
             'iter = {0:8d}/{1:8d}, loss_seg1 = {2:.3f} loss_seg2 = {3:.3f} loss_adv1 = {4:.3f}, loss_adv2 = {5:.3f} loss_D1 = {6:.3f} loss_D2 = {7:.3f}'.format(
